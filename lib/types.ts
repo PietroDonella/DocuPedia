@@ -10,11 +10,18 @@ export interface ProcessPdfResponse {
 
 /** Progresso emitido durante a estruturação do documento. */
 export interface StructureProgress {
-  phase: "analyzing" | "mapping" | "reducing";
-  /** Chunks já processados (apenas na fase 'mapping'). */
+  phase: "extracting" | "analyzing" | "mapping" | "reducing";
+  /** Passo atual (páginas na extração, ou chunks no mapeamento). */
   current?: number;
-  /** Total de chunks (apenas na fase 'mapping'). */
+  /** Total de passos da fase atual. */
   total?: number;
+}
+
+/** Tópico bruto do passo MAP (antes do reduce). */
+export interface MappedTopic {
+  title: string;
+  category: string;
+  content: string;
 }
 
 /**

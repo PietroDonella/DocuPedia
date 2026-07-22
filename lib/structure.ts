@@ -6,34 +6,26 @@ import {
   type Encyclopedia,
   type Topic,
 } from "@/lib/schema";
-import type { StructureProgress } from "@/lib/types";
+import type { StructureProgress, MappedTopic } from "@/lib/types";
+import { CHUNK_SIZE, SINGLE_PASS_LIMIT, chunkText } from "@/lib/chunk";
+
+export { CHUNK_SIZE, SINGLE_PASS_LIMIT, chunkText } from "@/lib/chunk";
+export type { MappedTopic } from "@/lib/types";
 
 /**
  * Estruturação do documento (texto do PDF -> enciclopédia categorizada).
  *
- * Para suportar PDFs grandes (100+ páginas) mantendo o texto ORIGINAL/LITERAL,
- * usamos uma estratégia MAP-REDUCE:
+ * Para suporte a PDFs grandes na Vercel, o cliente orquestra:
+ *   extract (browser) → /api/process-map (por chunk) → /api/process-reduce
  *
- *  - MAP:   o texto é dividido em pedaços (chunks); cada pedaço é enviado à IA,
- *           que extrai tópicos com o conteúdo transcrito literalmente + uma
- *           categoria sugerida. (Roda em paralelo, com concorrência limitada.)
- *  - REDUCE: a IA recebe APENAS o catálogo (id, título, categoria sugerida) —
- *           nunca o texto verbatim — e define uma taxonomia GLOBAL coerente,
- *           agrupando tópicos semelhantes. O texto literal é remontado em
- *           código a partir do resultado do MAP, então a IA jamais reescreve
- *           o conteúdo.
- *
- * Documentos pequenos usam um caminho rápido de uma única chamada.
+ * Este módulo ainda expõe `structureDocument` (single-request) para uso
+ * local/servidor, e as funções `mapChunkTopics` / `reduceMappedTopics` /
+ * `analyzeDocument` usadas pelas rotas de API.
  */
 
 const MODEL = "gemini-2.5-flash";
 
-// Docs até este tamanho (caracteres) usam 1 chamada só (mais rápido).
-const SINGLE_PASS_LIMIT = 45_000;
-// Tamanho de cada chunk no modo map-reduce. Mantido baixo para caber com
-// folga no limite de tokens de SAÍDA do modelo (transcrição verbatim).
-const CHUNK_SIZE = 18_000;
-// Nº máximo de chamadas MAP simultâneas (evita estourar rate limit da API).
+// Nº máximo de chamadas MAP simultâneas no caminho single-request.
 const MAP_CONCURRENCY = 4;
 
 // Regras de comportamento reutilizadas nos prompts.
@@ -72,6 +64,14 @@ async function singlePass(
   { onProgress }: StructureOptions,
 ): Promise<Encyclopedia> {
   onProgress?.({ phase: "analyzing" });
+  return analyzeDocument(text);
+}
+
+/**
+ * Classifica um documento pequeno em uma única chamada à IA.
+ * Exportado para a rota `/api/process-analyze` (Vercel: 1 invocação curta).
+ */
+export async function analyzeDocument(text: string): Promise<Encyclopedia> {
   const { object } = await generateObject({
     model: google(MODEL),
     schema: encyclopediaSchema,
@@ -150,68 +150,53 @@ interface CatalogEntry {
   category: string;
 }
 
-async function mapReduce(
-  text: string,
-  { onProgress }: StructureOptions,
+/**
+ * Extrai tópicos de UM chunk de texto (passo MAP).
+ * Usado pela rota `/api/process-map` — uma invocação curta na Vercel.
+ */
+export async function mapChunkTopics(chunk: string): Promise<MappedTopic[]> {
+  const { object } = await generateObject({
+    model: google(MODEL),
+    schema: mapSchema,
+    system:
+      "Você extrai tópicos de UM TRECHO de um documento maior. " +
+      VERBATIM_RULE +
+      "\n\nPara cada tópico, forneça um título, uma categoria sugerida " +
+      "e o conteúdo transcrito LITERALMENTE deste trecho. " +
+      LANGUAGE_RULE,
+    prompt:
+      "Extraia os tópicos do trecho a seguir.\n\n---INÍCIO DO TRECHO---\n" +
+      chunk +
+      "\n---FIM DO TRECHO---",
+  });
+  return object.topics;
+}
+
+/**
+ * Consolida tópicos mapeados em uma enciclopédia global (passo REDUCE).
+ * Usado pela rota `/api/process-reduce`.
+ */
+export async function reduceMappedTopics(
+  mapped: MappedTopic[],
 ): Promise<Encyclopedia> {
-  const chunks = chunkText(text, CHUNK_SIZE);
-  const total = chunks.length;
-  let completed = 0;
-
-  // ---- MAP (paralelo, concorrência limitada) ----
-  onProgress?.({ phase: "mapping", current: 0, total });
-  const mapResults = await mapWithConcurrency(
-    chunks,
-    MAP_CONCURRENCY,
-    async (chunk) => {
-      try {
-        const { object } = await generateObject({
-          model: google(MODEL),
-          schema: mapSchema,
-          system:
-            "Você extrai tópicos de UM TRECHO de um documento maior. " +
-            VERBATIM_RULE +
-            "\n\nPara cada tópico, forneça um título, uma categoria sugerida " +
-            "e o conteúdo transcrito LITERALMENTE deste trecho. " +
-            LANGUAGE_RULE,
-          prompt:
-            "Extraia os tópicos do trecho a seguir.\n\n---INÍCIO DO TRECHO---\n" +
-            chunk +
-            "\n---FIM DO TRECHO---",
-        });
-        return object.topics;
-      } catch (err) {
-        console.error("Falha ao processar um chunk (ignorado):", err);
-        return [];
-      } finally {
-        completed++;
-        onProgress?.({ phase: "mapping", current: completed, total });
-      }
-    },
-  );
-
-  // Achata os tópicos e atribui ids estáveis.
   const topicsById = new Map<string, Topic>();
   const catalog: CatalogEntry[] = [];
-  let counter = 0;
-  for (const topics of mapResults) {
-    for (const t of topics) {
-      const id = `t${counter++}`;
-      topicsById.set(id, { title: t.title, summary: t.content });
-      catalog.push({ id, title: t.title, category: t.category });
-    }
-  }
+  mapped.forEach((t, i) => {
+    const id = `t${i}`;
+    topicsById.set(id, { title: t.title, summary: t.content });
+    catalog.push({ id, title: t.title, category: t.category });
+  });
 
-  // Sem tópicos extraídos: cai para o caminho simples com o início do texto.
   if (catalog.length === 0) {
-    return singlePass(text.slice(0, SINGLE_PASS_LIMIT), { onProgress });
+    return {
+      title: "Documento",
+      description: "Não foi possível extrair tópicos do conteúdo enviado.",
+      categories: [],
+    };
   }
 
-  // ---- REDUCE (só metadados: nada de texto verbatim) ----
-  onProgress?.({ phase: "reducing" });
-  let reduced: z.infer<typeof reduceSchema>;
   try {
-    const { object } = await generateObject({
+    const { object: reduced } = await generateObject({
       model: google(MODEL),
       schema: reduceSchema,
       system:
@@ -228,13 +213,56 @@ async function mapReduce(
           .map((c) => `${c.id} | ${c.title} | ${c.category}`)
           .join("\n"),
     });
-    reduced = object;
+    return assembleFromReduced(reduced, catalog, topicsById);
   } catch (err) {
     console.error("Falha no REDUCE; usando categorias sugeridas:", err);
     return assembleFromSuggested(catalog, topicsById);
   }
+}
 
-  // ---- Remonta a enciclopédia com o texto verbatim (em código) ----
+async function mapReduce(
+  text: string,
+  { onProgress }: StructureOptions,
+): Promise<Encyclopedia> {
+  const chunks = chunkText(text, CHUNK_SIZE);
+  const total = chunks.length;
+  let completed = 0;
+
+  // ---- MAP (paralelo, concorrência limitada) ----
+  onProgress?.({ phase: "mapping", current: 0, total });
+  const mapResults = await mapWithConcurrency(
+    chunks,
+    MAP_CONCURRENCY,
+    async (chunk) => {
+      try {
+        return await mapChunkTopics(chunk);
+      } catch (err) {
+        console.error("Falha ao processar um chunk (ignorado):", err);
+        return [];
+      } finally {
+        completed++;
+        onProgress?.({ phase: "mapping", current: completed, total });
+      }
+    },
+  );
+
+  const mapped = mapResults.flat();
+
+  // Sem tópicos extraídos: cai para o caminho simples com o início do texto.
+  if (mapped.length === 0) {
+    return singlePass(text.slice(0, SINGLE_PASS_LIMIT), { onProgress });
+  }
+
+  // ---- REDUCE ----
+  onProgress?.({ phase: "reducing" });
+  return reduceMappedTopics(mapped);
+}
+
+function assembleFromReduced(
+  reduced: z.infer<typeof reduceSchema>,
+  catalog: CatalogEntry[],
+  topicsById: Map<string, Topic>,
+): Encyclopedia {
   const used = new Set<string>();
   const categories = reduced.categories
     .map((c) => {
@@ -249,7 +277,6 @@ async function mapReduce(
     })
     .filter((c) => c.topics.length > 0);
 
-  // Tópicos que a IA não referenciou: reencaixa pela categoria sugerida.
   const leftovers = catalog.filter((c) => !used.has(c.id));
   for (const entry of leftovers) {
     const topic = topicsById.get(entry.id)!;
@@ -290,36 +317,6 @@ function assembleFromSuggested(
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
-
-/** Divide o texto em chunks <= size, respeitando limites de parágrafo. */
-function chunkText(text: string, size: number): string[] {
-  const paragraphs = text.split(/\n\s*\n/);
-  const chunks: string[] = [];
-  let current = "";
-
-  const flush = () => {
-    if (current.trim()) chunks.push(current);
-    current = "";
-  };
-
-  for (const paragraph of paragraphs) {
-    // Parágrafo maior que o chunk: quebra "na força".
-    if (paragraph.length > size) {
-      flush();
-      for (let i = 0; i < paragraph.length; i += size) {
-        chunks.push(paragraph.slice(i, i + size));
-      }
-      continue;
-    }
-    if (current.length + paragraph.length + 2 > size && current.length > 0) {
-      flush();
-    }
-    current += (current ? "\n\n" : "") + paragraph;
-  }
-  flush();
-
-  return chunks;
-}
 
 function normalizeName(name: string): string {
   return name

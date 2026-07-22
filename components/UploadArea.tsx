@@ -2,13 +2,16 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type {
-  ProcessPdfResponse,
-  ProcessStreamEvent,
-  StructureProgress,
-} from "@/lib/types";
+import { extractPdfText } from "@/lib/pdf-client";
+import { CHUNK_SIZE, SINGLE_PASS_LIMIT, chunkText } from "@/lib/chunk";
+import type { MappedTopic, ProcessPdfResponse, StructureProgress } from "@/lib/types";
 
 type Status = "idle" | "dragging" | "uploading" | "error";
+
+/** Concorrência de chamadas MAP no cliente (cada uma = 1 função Vercel). */
+const CLIENT_MAP_CONCURRENCY = 2;
+/** Limite defensivo de caracteres enviados à IA. */
+const MAX_CHARS = 500_000;
 
 export default function UploadArea() {
   const router = useRouter();
@@ -22,90 +25,73 @@ export default function UploadArea() {
     async (file: File) => {
       setErrorMsg(null);
 
-      if (file.type !== "application/pdf") {
+      if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
         setStatus("error");
         setErrorMsg("Por favor, envie um arquivo no formato PDF.");
         return;
       }
 
       setFileName(file.name);
-      setProgress(null);
+      setProgress({ phase: "extracting", current: 0, total: 0 });
       setStatus("uploading");
 
       try {
-        const formData = new FormData();
-        formData.append("file", file);
-
-        const res = await fetch("/api/process-pdf", {
-          method: "POST",
-          body: formData,
+        // 1) Extração no navegador — evita o limite de ~4,5 MB do body na Vercel.
+        const rawText = await extractPdfText(file, (current, total) => {
+          setProgress({ phase: "extracting", current, total });
         });
 
-        // Erros de validação/extração vêm como JSON (status != 2xx).
-        if (!res.ok) {
-          const { error } = (await res.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          throw new Error(error ?? "Falha ao processar o PDF.");
+        if (rawText.length < 50) {
+          throw new Error(
+            "Não foi possível extrair texto suficiente do PDF. Ele pode ser um PDF de imagens (escaneado) sem camada de texto.",
+          );
         }
-        if (!res.body) throw new Error("Resposta sem corpo.");
 
-        // Sucesso: a resposta é um stream NDJSON (um evento por linha).
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let result: ProcessPdfResponse | null = null;
+        const text = rawText.slice(0, MAX_CHARS);
+        let result: ProcessPdfResponse;
 
-        const handleLine = (line: string) => {
-          const trimmed = line.trim();
-          if (!trimmed) return;
-          const event = JSON.parse(trimmed) as ProcessStreamEvent;
+        if (text.length <= SINGLE_PASS_LIMIT) {
+          // 2a) Documento pequeno: uma única chamada.
+          setProgress({ phase: "analyzing" });
+          result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
+            mode: "analyze",
+            text,
+          });
+        } else {
+          // 2b) Documento grande: map-reduce em várias invocações curtas.
+          const chunks = chunkText(text, CHUNK_SIZE);
+          setProgress({ phase: "mapping", current: 0, total: chunks.length });
 
-          if (event.type === "progress") {
-            setProgress({
-              phase: event.phase,
-              current: event.current,
-              total: event.total,
-            });
-          } else if (event.type === "error") {
-            throw new Error(event.error);
-          } else if (event.type === "done") {
-            result = { id: event.id, data: event.data };
+          const mapped = await mapChunksWithConcurrency(
+            chunks,
+            CLIENT_MAP_CONCURRENCY,
+            (current, total) =>
+              setProgress({ phase: "mapping", current, total }),
+          );
+
+          if (mapped.length === 0) {
+            throw new Error(
+              "A IA não conseguiu extrair tópicos deste documento. Tente outro PDF.",
+            );
           }
-        };
 
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          let newlineIndex: number;
-          while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, newlineIndex);
-            buffer = buffer.slice(newlineIndex + 1);
-            handleLine(line);
-          }
+          setProgress({ phase: "reducing" });
+          result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
+            mode: "reduce",
+            topics: mapped,
+          });
         }
-        // Processa qualquer resto sem quebra de linha final.
-        if (buffer.trim()) handleLine(buffer);
 
-        if (!result) throw new Error("Processamento não concluído.");
-        const finalResult = result as ProcessPdfResponse;
-
-        // Armazenamento local: a página do documento lê daqui para exibir
-        // o resultado sem reprocessar o PDF.
         try {
           sessionStorage.setItem(
-            `docupedia:${finalResult.id}`,
-            JSON.stringify(finalResult.data),
+            `docupedia:${result.id}`,
+            JSON.stringify(result.data),
           );
         } catch {
-          // sessionStorage pode falhar (modo privado / cota).
+          // ignore
         }
 
-        // Atualiza os Server Components (lista de PDFs na barra lateral) e
-        // navega para o documento recém-criado.
-        router.push(`/documento/${finalResult.id}`);
+        router.push(`/documento/${result.id}`);
         router.refresh();
       } catch (err) {
         setStatus("error");
@@ -130,10 +116,9 @@ export default function UploadArea() {
 
   const isBusy = status === "uploading";
 
-  // Percentual determinístico apenas na fase de mapeamento; nas demais fases
-  // a barra é "indeterminada" (animada).
   const percent =
-    progress?.phase === "mapping" && progress.total
+    (progress?.phase === "mapping" || progress?.phase === "extracting") &&
+    progress.total
       ? Math.min(99, Math.round(((progress.current ?? 0) / progress.total) * 100))
       : null;
 
@@ -185,7 +170,6 @@ export default function UploadArea() {
                 {progressLabel(progress)}
               </p>
 
-              {/* Barra de progresso */}
               <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-surface-border dark:bg-white/10">
                 {percent !== null ? (
                   <div
@@ -224,6 +208,10 @@ export default function UploadArea() {
                 </span>{" "}
                 um arquivo
               </p>
+              <p className="mt-3 text-xs text-ink-muted dark:text-zinc-500">
+                Arquivos grandes (dezenas de MB) são ok — o texto é extraído no
+                seu navegador antes do envio.
+              </p>
             </div>
           </>
         )}
@@ -238,10 +226,53 @@ export default function UploadArea() {
   );
 }
 
-/** Texto amigável para cada fase do processamento. */
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error ?? `Falha na requisição (${res.status}).`);
+  }
+  return data;
+}
+
+async function mapChunksWithConcurrency(
+  chunks: string[],
+  limit: number,
+  onProgress: (current: number, total: number) => void,
+): Promise<MappedTopic[]> {
+  const results = new Array<MappedTopic[]>(chunks.length);
+  let cursor = 0;
+  let completed = 0;
+
+  async function worker() {
+    while (cursor < chunks.length) {
+      const index = cursor++;
+      const res = await postJson<{ topics: MappedTopic[] }>("/api/process-map", {
+        chunk: chunks[index],
+      });
+      results[index] = res.topics ?? [];
+      completed++;
+      onProgress(completed, chunks.length);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, chunks.length) }, () => worker()),
+  );
+  return results.flat();
+}
+
 function progressLabel(progress: StructureProgress | null): string {
-  if (!progress) return "Enviando e lendo o PDF…";
+  if (!progress) return "Preparando…";
   switch (progress.phase) {
+    case "extracting":
+      return progress.total
+        ? `Lendo o PDF… (página ${progress.current ?? 0} de ${progress.total})`
+        : "Lendo o PDF…";
     case "analyzing":
       return "Analisando o documento…";
     case "mapping":
