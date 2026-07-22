@@ -204,7 +204,7 @@ async function mapReduce(
 
   // Sem tópicos extraídos: cai para o caminho simples com o início do texto.
   if (catalog.length === 0) {
-    return singlePass(text.slice(0, SINGLE_PASS_LIMIT));
+    return singlePass(text.slice(0, SINGLE_PASS_LIMIT), { onProgress });
   }
 
   // ---- REDUCE (só metadados: nada de texto verbatim) ----
