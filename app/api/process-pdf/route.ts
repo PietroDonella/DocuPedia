@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { structureDocument } from "@/lib/structure";
+import { saveDocument } from "@/lib/documents";
+import { getCurrentUser } from "@/lib/auth";
 import type { ProcessStreamEvent } from "@/lib/types";
 
 // A extração de PDF e o processamento por IA (map-reduce em PDFs grandes)
@@ -16,6 +18,17 @@ export const maxDuration = 300;
 const MAX_CHARS = 500_000;
 
 export async function POST(req: Request) {
+  // ---- 0) Autenticação ----------------------------------------------------
+  // O documento é vinculado ao usuário logado. Sem sessão, recusamos.
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json(
+      { error: "Você precisa estar autenticado para enviar um PDF." },
+      { status: 401 },
+    );
+  }
+  const userId = user.id;
+
   // ---- 1) Validação + extração de texto ----------------------------------
   // Erros aqui retornam JSON com o status apropriado (a resposta ainda não
   // virou stream). O streaming só começa quando temos texto válido.
@@ -72,10 +85,16 @@ export async function POST(req: Request) {
       };
 
       try {
+        const id = randomUUID();
         const data = await structureDocument(text, {
           onProgress: (progress) => send({ type: "progress", ...progress }),
         });
-        send({ type: "done", id: randomUUID(), data });
+
+        // Persiste no Supabase vinculado ao usuário (best-effort). Se falhar,
+        // o front-end ainda exibe via sessionStorage nesta sessão.
+        await saveDocument(id, userId, data);
+
+        send({ type: "done", id, data });
       } catch (err) {
         console.error("Erro ao estruturar o PDF:", err);
         send({ type: "error", error: "Erro ao processar o conteúdo do PDF." });

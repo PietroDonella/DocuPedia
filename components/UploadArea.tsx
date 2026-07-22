@@ -103,7 +103,10 @@ export default function UploadArea() {
           // sessionStorage pode falhar (modo privado / cota).
         }
 
+        // Atualiza os Server Components (lista de PDFs na barra lateral) e
+        // navega para o documento recém-criado.
         router.push(`/documento/${finalResult.id}`);
+        router.refresh();
       } catch (err) {
         setStatus("error");
         setProgress(null);

@@ -2,8 +2,8 @@
 
 import { useMemo, useState } from "react";
 import type { Category, Encyclopedia } from "@/lib/schema";
-import SearchBar from "./SearchBar";
-import Sidebar from "./Sidebar";
+import { useSearch } from "./app/search-context";
+import CategoryNav from "./CategoryNav";
 import ContentView from "./ContentView";
 
 interface EncyclopediaShellProps {
@@ -11,14 +11,12 @@ interface EncyclopediaShellProps {
 }
 
 /**
- * Componente cliente que orquestra a experiência de enciclopédia:
- * barra de pesquisa (topo) + menu lateral (categorias) + conteúdo principal.
- *
- * Toda a interatividade (busca e navegação) acontece no cliente sobre o
- * objeto já processado pela IA — nenhuma nova chamada de rede é necessária.
+ * Exibe um documento processado: navegação de categorias (coluna
+ * secundária) + conteúdo principal. A busca vem da barra global no topo
+ * (SearchContext), então aqui apenas filtramos/destacamos o resultado.
  */
 export default function EncyclopediaShell({ data }: EncyclopediaShellProps) {
-  const [search, setSearch] = useState("");
+  const { search } = useSearch();
   const [activeCategory, setActiveCategory] = useState<string | null>(
     data.categories[0]?.name ?? null,
   );
@@ -38,7 +36,6 @@ export default function EncyclopediaShell({ data }: EncyclopediaShellProps) {
             topic.summary.toLowerCase().includes(term),
         );
 
-        // Se o nome da categoria bate, mantemos todos os tópicos.
         if (categoryMatches) return category;
         if (matchingTopics.length > 0)
           return { ...category, topics: matchingTopics };
@@ -57,29 +54,20 @@ export default function EncyclopediaShell({ data }: EncyclopediaShellProps) {
   const isEmptySearch = term.length > 0 && filteredCategories.length === 0;
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <SearchBar
-        value={search}
-        onChange={setSearch}
-        documentTitle={data.title}
+    <div className="flex min-h-full flex-1">
+      <CategoryNav
+        categories={filteredCategories}
+        activeCategory={currentCategory?.name ?? null}
+        onSelectCategory={setActiveCategory}
       />
 
-      <div className="flex flex-1">
-        <Sidebar
-          documentTitle={data.title}
-          categories={filteredCategories}
-          activeCategory={currentCategory?.name ?? null}
-          onSelectCategory={setActiveCategory}
-        />
-
-        <ContentView
-          documentTitle={data.title}
-          documentDescription={data.description}
-          category={currentCategory}
-          searchTerm={search}
-          isEmptySearch={isEmptySearch}
-        />
-      </div>
+      <ContentView
+        documentTitle={data.title}
+        documentDescription={data.description}
+        category={currentCategory}
+        searchTerm={search}
+        isEmptySearch={isEmptySearch}
+      />
     </div>
   );
 }

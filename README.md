@@ -2,9 +2,7 @@
 
 Transforme PDFs extensos (livros técnicos, manuais, livros de receitas) em uma **enciclopédia categorizada e navegável**, gerada automaticamente por IA.
 
-Envie um PDF → a IA extrai o texto, identifica um título, agrupa o conteúdo em **categorias** e cria **tópicos** fiéis ao original → você navega no resultado como uma documentação ou uma Wikipédia.
-
-O resultado do processamento é guardado **localmente no navegador** (`sessionStorage`) — não há banco de dados.
+Após o **login**, a barra lateral fica sempre visível: Home (enviar PDFs), lista dos seus PDFs categorizados, usuário + modo noturno. A barra de pesquisa fica centralizada no topo. PDFs grandes usam **map-reduce** com barra de progresso, e o resultado é salvo no **Supabase** por usuário.
 
 ## Stack
 
@@ -13,73 +11,63 @@ O resultado do processamento é guardado **localmente no navegador** (`sessionSt
 - **Vercel AI SDK** (`ai`) + `@ai-sdk/google` — modelo `gemini-2.5-flash`
 - **`generateObject` + Zod** — saída estruturada e previsível da IA
 - **`pdf-parse`** — extração de texto do PDF
+- **Supabase** — autenticação (e-mail/senha) + persistência por usuário
 - **Vercel** — deploy
 
 ## Estrutura do projeto
 
 ```
 app/
-  layout.tsx                     Layout raiz + estilos globais + tema (anti-flash)
-  page.tsx                       Tela inicial com a Dropzone de upload
-  globals.css                    Estilos base (Tailwind)
-  api/process-pdf/route.ts       Extrai texto do PDF + gera a estrutura via IA
-  documento/[id]/
-    page.tsx                     Página do documento
-    DocumentLoader.tsx           Carrega o resultado do armazenamento local
+  layout.tsx                     Layout raiz + tema (anti-flash)
+  login/page.tsx                 Entrar / cadastrar (Supabase Auth)
+  (app)/layout.tsx               Área logada (AppShell + sidebar)
+  (app)/page.tsx                 Home: upload de PDF centralizado
+  (app)/documento/[id]/         Página do documento categorizado
+  api/process-pdf/route.ts       Extrai PDF + IA (stream NDJSON)
 components/
-  UploadArea.tsx                 Dropzone (arrastar e soltar / clicar)
-  EncyclopediaShell.tsx          Orquestra busca + sidebar + conteúdo
-  SearchBar.tsx                  Barra de pesquisa fixa no topo
-  Sidebar.tsx                    Menu lateral com as categorias + slider de tema
-  ContentView.tsx                Área principal (tópicos + destaque da busca)
-  ThemeToggle.tsx                Slider de modo escuro
+  app/
+    AppShell.tsx                 Casca: sidebar + busca + conteúdo
+    AppSidebar.tsx               Home, PDFs, usuário, tema (colapsável)
+    TopSearchBar.tsx             Pesquisa centralizada no topo
+    search-context.tsx           Estado global da busca
+  UploadArea.tsx                 Dropzone + progresso
+  EncyclopediaShell.tsx          Categorias + conteúdo do documento
+  CategoryNav.tsx                Navegação de categorias do PDF aberto
+  ContentView.tsx                Tópicos + highlight da busca
+  ThemeToggle.tsx                Modo claro/escuro
 lib/
-  schema.ts                      Schema Zod compartilhado (Encyclopedia)
-  types.ts                       Tipos (ProcessPdfResponse)
+  auth.ts                        getCurrentUser()
+  documents.ts                   save / get / list por usuário
+  structure.ts                   Map-reduce + progresso
+  schema.ts / types.ts
+  supabase/                      client, server, middleware
+middleware.ts                    Protege rotas (exige login)
+supabase/schema.sql              Tabela documents + RLS por user_id
 ```
 
 ## Como rodar
 
-1. Instale as dependências:
+1. `npm install`
+2. Copie `.env.example` → `.env.local` e preencha:
+   - `GOOGLE_GENERATIVE_AI_API_KEY`
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` (chave **anon/public**)
+   - `SUPABASE_SERVICE_ROLE_KEY` (chave **service_role**)
+3. No Supabase: rode `supabase/schema.sql` e habilite Auth (Email). Em dev,
+   pode desativar "Confirm email" em Authentication → Providers → Email.
+4. `npm run dev` → http://localhost:3000 → faça login → envie um PDF.
 
-```bash
-npm install
-```
+## Layout (área logada)
 
-2. Configure as variáveis de ambiente (copie e preencha):
-
-```bash
-cp .env.example .env.local
-```
-
-Preencha `GOOGLE_GENERATIVE_AI_API_KEY` (obtida em
-[Google AI Studio](https://aistudio.google.com/app/apikey)).
-
-3. Rode o servidor de desenvolvimento:
-
-```bash
-npm run dev
-```
-
-Acesse http://localhost:3000 e envie um PDF.
-
-## Armazenamento
-
-O resultado do processamento é salvo no `sessionStorage` do navegador logo
-após o upload e lido pela página `/documento/[id]`. Isso significa que o
-documento fica disponível apenas **na mesma aba/sessão** — ao fechar a aba, é
-preciso reenviar o PDF. Não há banco de dados nem backend de persistência.
-
-## Deploy na Vercel
-
-Importe o repositório na Vercel, configure a variável de ambiente
-`GOOGLE_GENERATIVE_AI_API_KEY` em *Project Settings → Environment Variables* e
-faça o deploy. A rota de API usa runtime Node.js (necessário para o `pdf-parse`).
+| Região | Conteúdo |
+|--------|----------|
+| **Barra lateral** | Home, lista de PDFs do usuário, usuário + modo noturno + sair. Expande/retrai. |
+| **Topo** | Barra de pesquisa centralizada (ativa dentro de um documento). |
+| **Centro** | Home = upload; `/documento/[id]` = conteúdo categorizado (+ CategoryNav). |
 
 ## Notas
 
-- O texto enviado à IA é truncado (`MAX_CHARS` em `route.ts`) para controlar
-  custo e latência em documentos muito grandes. Para livros inteiros,
-  considere uma estratégia de *chunking* + *map-reduce*.
-- PDFs escaneados (somente imagem, sem camada de texto) não terão texto
-  extraível — seria necessário OCR.
+- Sem sessão, o middleware redireciona para `/login`.
+- Cada documento é vinculado a `user_id` (RLS: só o dono lê).
+- PDFs grandes: `MAX_CHARS` ~500k; map-reduce automático acima do limite single-pass.
+- Na Vercel Hobby, `maxDuration` da API fica limitado a ~60s.

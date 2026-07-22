@@ -11,7 +11,7 @@ const STORAGE_KEY = "docupedia-theme";
  * O tema inicial é aplicado por um script inline no layout (evita flash),
  * então aqui apenas sincronizamos o estado do controle após montar.
  */
-export default function ThemeToggle() {
+export default function ThemeToggle({ compact = false }: { compact?: boolean }) {
   const [isDark, setIsDark] = useState(false);
   const [mounted, setMounted] = useState(false);
 
@@ -30,6 +30,23 @@ export default function ThemeToggle() {
       // ignore (modo privado)
     }
     setIsDark(next);
+  }
+
+  // Versão compacta (somente ícone) para a barra lateral colapsada.
+  if (compact) {
+    return (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={mounted ? isDark : undefined}
+        aria-label="Alternar modo escuro"
+        title={isDark ? "Modo escuro" : "Modo claro"}
+        onClick={toggle}
+        className="grid h-9 w-9 place-items-center rounded-md text-ink-soft transition hover:bg-white hover:text-ink dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-zinc-100"
+      >
+        {isDark ? <MoonIcon /> : <SunIcon />}
+      </button>
+    );
   }
 
   return (
