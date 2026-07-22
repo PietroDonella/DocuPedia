@@ -80,3 +80,19 @@ export async function listUserDocuments(): Promise<DocumentListItem[]> {
     return [];
   }
 }
+
+/** Remove um documento do usuário autenticado. Retorna `true` se apagou. */
+export async function deleteDocument(id: string): Promise<boolean> {
+  try {
+    const supabase = createClient();
+    const { error } = await supabase.from("documents").delete().eq("id", id);
+    if (error) {
+      console.error("Erro ao deletar documento:", error);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("Falha ao deletar documento:", err);
+    return false;
+  }
+}

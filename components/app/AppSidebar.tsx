@@ -30,8 +30,44 @@ export default function AppSidebar({
   const pathname = usePathname();
   const router = useRouter();
   const [signingOut, setSigningOut] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const isHome = pathname === "/";
+
+  async function handleDelete(e: React.MouseEvent, id: string, title: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (deletingId) return;
+    if (!window.confirm(`Excluir "${title}"? Esta ação não pode ser desfeita.`)) {
+      return;
+    }
+
+    setDeletingId(id);
+    try {
+      const res = await fetch(`/api/documents?id=${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? "Falha ao excluir.");
+      }
+      try {
+        sessionStorage.removeItem(`docupedia:${id}`);
+      } catch {
+        // ignore
+      }
+      if (pathname === `/documento/${id}`) {
+        router.push("/");
+      }
+      router.refresh();
+    } catch (err) {
+      window.alert(
+        err instanceof Error ? err.message : "Não foi possível excluir o PDF.",
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   async function handleSignOut() {
     setSigningOut(true);
@@ -116,22 +152,44 @@ export default function AppSidebar({
           {documents.map((doc) => {
             const href = `/documento/${doc.id}`;
             const isActive = pathname === href;
+            const isDeleting = deletingId === doc.id;
             return (
-              <Link
+              <div
                 key={doc.id}
-                href={href}
-                title={doc.title}
                 className={[
-                  "flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition",
-                  collapsed ? "justify-center" : "",
+                  "group/item flex items-center gap-1 rounded-md transition",
                   isActive
-                    ? "bg-accent-soft font-medium text-accent dark:bg-accent/20 dark:text-indigo-300"
-                    : "text-ink-soft hover:bg-white hover:text-ink dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-zinc-100",
+                    ? "bg-accent-soft dark:bg-accent/20"
+                    : "hover:bg-white dark:hover:bg-white/5",
                 ].join(" ")}
               >
-                <DocIcon />
-                {!collapsed && <span className="truncate">{doc.title}</span>}
-              </Link>
+                <Link
+                  href={href}
+                  title={doc.title}
+                  className={[
+                    "flex min-w-0 flex-1 items-center gap-3 rounded-md px-2.5 py-2 text-sm transition",
+                    collapsed ? "justify-center" : "",
+                    isActive
+                      ? "font-medium text-accent dark:text-indigo-300"
+                      : "text-ink-soft hover:text-ink dark:text-zinc-400 dark:hover:text-zinc-100",
+                  ].join(" ")}
+                >
+                  <DocIcon />
+                  {!collapsed && <span className="truncate">{doc.title}</span>}
+                </Link>
+                {!collapsed && (
+                  <button
+                    type="button"
+                    onClick={(e) => void handleDelete(e, doc.id, doc.title)}
+                    disabled={isDeleting}
+                    aria-label={`Excluir ${doc.title}`}
+                    title="Excluir"
+                    className="mr-1.5 grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-muted opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover/item:opacity-100 disabled:opacity-50 dark:hover:bg-red-500/10 dark:hover:text-red-300"
+                  >
+                    <TrashIcon />
+                  </button>
+                )}
+              </div>
             );
           })}
         </nav>
@@ -238,6 +296,23 @@ function DocIcon() {
     >
       <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
       <path d="M14 3v5h5M9 13h6M9 17h6" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg
+      className="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
     </svg>
   );
 }
