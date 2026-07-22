@@ -13,27 +13,33 @@ export const topicSchema = z.object({
   summary: z
     .string()
     .describe(
-      "Conteúdo COMPLETO e fiel do tópico, preservando a essência original " +
-        "do texto extraído. NÃO resuma agressivamente: mantenha detalhes " +
-        "importantes, exemplos, listas, passos, medidas, números e a " +
-        "terminologia original do documento. Reescreva apenas o mínimo " +
-        "necessário para organizar e dar clareza, sem perder informação. " +
-        "Prefira vários parágrafos a um resumo curto. Se o trecho original " +
-        "tiver instruções ou receitas, reproduza os passos na íntegra.",
+      "Conteúdo ORIGINAL e LITERAL do tópico. Transcreva o texto EXATAMENTE " +
+        "como aparece no documento — NÃO reescreva, NÃO parafraseie e NÃO " +
+        "resuma. Apenas copie o(s) trecho(s) correspondente(s), corrigindo " +
+        "somente artefatos da extração do PDF (quebras de linha no meio de " +
+        "frases, palavras hifenizadas e espaços duplicados). Preserve 100% " +
+        "das palavras, frases, exemplos, listas, passos, medidas, números e " +
+        "a terminologia originais.",
     ),
 });
 
 export const categorySchema = z.object({
   name: z
     .string()
-    .describe("Nome da categoria (ex: 'Entradas', 'Sobremesas', 'Instalação')."),
+    .describe(
+      "Nome da categoria — um tema abrangente que agrupa vários tópicos " +
+        "relacionados (ex.: 'Entradas', 'Sobremesas', 'Instalação').",
+    ),
   description: z
     .string()
     .describe("Uma frase resumindo do que trata esta categoria.")
     .optional(),
   topics: z
     .array(topicSchema)
-    .describe("Lista de tópicos pertencentes a esta categoria."),
+    .describe(
+      "Tópicos pertencentes a esta categoria. Tópicos semelhantes ou " +
+        "duplicados devem ser mesclados em um único tópico, não repetidos.",
+    ),
 });
 
 export const encyclopediaSchema = z.object({
@@ -46,7 +52,10 @@ export const encyclopediaSchema = z.object({
   categories: z
     .array(categorySchema)
     .describe(
-      "Lista de categorias que agrupam logicamente os tópicos do documento.",
+      "Categorias que agrupam logicamente os tópicos por afinidade temática. " +
+        "Prefira poucas categorias abrangentes e bem definidas a muitas " +
+        "categorias pequenas e fragmentadas. Cada tópico deve pertencer à " +
+        "categoria mais adequada, sem duplicação entre categorias.",
     ),
 });
 
