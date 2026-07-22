@@ -54,7 +54,7 @@ export default function EncyclopediaShell({ data }: EncyclopediaShellProps) {
   const isEmptySearch = term.length > 0 && filteredCategories.length === 0;
 
   return (
-    <div className="flex min-h-full flex-1">
+    <div className="flex h-full min-h-0 flex-1 overflow-hidden">
       <CategoryNav
         categories={filteredCategories}
         activeCategory={currentCategory?.name ?? null}

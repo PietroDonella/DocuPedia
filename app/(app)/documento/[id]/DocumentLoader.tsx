@@ -34,7 +34,7 @@ export default function DocumentLoader({ id }: { id: string }) {
 
   if (state.status === "loading") {
     return (
-      <div className="grid flex-1 place-items-center px-6 text-center">
+      <div className="grid h-full flex-1 place-items-center px-6 text-center">
         <p className="text-ink-muted dark:text-zinc-500">
           Carregando documento…
         </p>
@@ -44,7 +44,7 @@ export default function DocumentLoader({ id }: { id: string }) {
 
   if (state.status === "not-found") {
     return (
-      <div className="grid flex-1 place-items-center px-6 text-center">
+      <div className="grid h-full flex-1 place-items-center px-6 text-center">
         <div className="max-w-md">
           <h1 className="text-2xl font-semibold text-ink dark:text-zinc-100">
             Documento não encontrado

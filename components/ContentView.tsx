@@ -27,7 +27,7 @@ export default function ContentView({
   const term = searchTerm.trim();
 
   return (
-    <main className="min-w-0 flex-1 px-6 py-10 lg:px-12">
+    <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-10 lg:px-12">
       <div className="mx-auto max-w-3xl">
         <header className="mb-8 border-b border-surface-border pb-6 dark:border-white/10">
           <p className="text-xs font-medium uppercase tracking-wider text-accent">

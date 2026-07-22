@@ -19,7 +19,7 @@ export default function CategoryNav({
   onSelectCategory,
 }: CategoryNavProps) {
   return (
-    <aside className="sticky top-0 hidden h-[calc(100vh-4rem)] w-60 shrink-0 self-start overflow-y-auto border-r border-surface-border bg-surface-subtle lg:block dark:border-white/10 dark:bg-zinc-900/50">
+    <aside className="hidden h-full w-60 shrink-0 flex-col overflow-y-auto border-r border-surface-border bg-surface-subtle lg:flex dark:border-white/10 dark:bg-zinc-900/50">
       <div className="px-4 py-6">
         <p className="px-2 text-xs font-semibold uppercase tracking-wider text-ink-muted dark:text-zinc-500">
           Categorias

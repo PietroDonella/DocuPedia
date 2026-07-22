@@ -5,7 +5,7 @@ import UploadArea from "@/components/UploadArea";
  */
 export default function HomePage() {
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center px-6 py-16">
+    <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-16">
       <div className="mb-10 text-center">
         <span className="inline-flex items-center gap-2 rounded-full bg-accent-soft px-3 py-1 text-xs font-medium text-accent dark:bg-accent/20 dark:text-indigo-300">
           <span className="h-1.5 w-1.5 rounded-full bg-accent" />
