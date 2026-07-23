@@ -4,12 +4,13 @@ import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { extractPdfText } from "@/lib/pdf-client";
 import { CHUNK_SIZE, SINGLE_PASS_LIMIT, chunkText } from "@/lib/chunk";
+import { ErrorCode, formatError } from "@/lib/errors";
 import type { MappedTopic, ProcessPdfResponse, StructureProgress } from "@/lib/types";
 
 type Status = "idle" | "dragging" | "uploading" | "error";
 
 /** Concorrência de chamadas MAP no cliente (cada uma = 1 função Vercel). */
-const CLIENT_MAP_CONCURRENCY = 2;
+const CLIENT_MAP_CONCURRENCY = 1;
 /** Limite defensivo de caracteres enviados à IA. */
 const MAX_CHARS = 500_000;
 
@@ -43,7 +44,10 @@ export default function UploadArea() {
 
         if (rawText.length < 50) {
           throw new Error(
-            "Não foi possível extrair texto suficiente do PDF. Ele pode ser um PDF de imagens (escaneado) sem camada de texto.",
+            formatError(
+              "Não foi possível extrair texto suficiente do PDF. Ele pode ser um PDF de imagens (escaneado) sem camada de texto.",
+              ErrorCode.EXTRACT_EMPTY,
+            ),
           );
         }
 
@@ -71,7 +75,10 @@ export default function UploadArea() {
 
           if (mapped.length === 0) {
             throw new Error(
-              "A IA não conseguiu extrair tópicos deste documento. Tente outro PDF.",
+              formatError(
+                "A IA não conseguiu extrair tópicos deste documento. Tente outro PDF.",
+                ErrorCode.MAP_FAIL,
+              ),
             );
           }
 
@@ -227,16 +234,32 @@ export default function UploadArea() {
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) {
-    throw new Error(data.error ?? `Falha na requisição (${res.status}).`);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json().catch(() => ({}))) as T & {
+      error?: string;
+      code?: string;
+    };
+    if (!res.ok) {
+      const msg =
+        data.error ??
+        formatError(`Falha na requisição (${res.status}).`, ErrorCode.NETWORK);
+      throw new Error(msg);
+    }
+    return data;
+  } catch (err) {
+    if (err instanceof Error && /\[[A-Z0-9-]+\]/.test(err.message)) throw err;
+    throw new Error(
+      formatError(
+        err instanceof Error ? err.message : "Falha de rede.",
+        ErrorCode.NETWORK,
+      ),
+    );
   }
-  return data;
 }
 
 async function mapChunksWithConcurrency(
@@ -251,10 +274,17 @@ async function mapChunksWithConcurrency(
   async function worker() {
     while (cursor < chunks.length) {
       const index = cursor++;
-      const res = await postJson<{ topics: MappedTopic[] }>("/api/process-map", {
-        chunk: chunks[index],
-      });
-      results[index] = res.topics ?? [];
+      try {
+        const res = await postJson<{ topics: MappedTopic[] }>(
+          "/api/process-map",
+          { chunk: chunks[index] },
+        );
+        results[index] = res.topics ?? [];
+      } catch (err) {
+        // Um trecho falhou após retry no servidor — segue com os demais.
+        console.warn("Chunk ignorado após falha no MAP:", index, err);
+        results[index] = [];
+      }
       completed++;
       onProgress(completed, chunks.length);
     }

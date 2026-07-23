@@ -6,8 +6,12 @@
 /** Docs até este tamanho (caracteres) usam 1 chamada só. */
 export const SINGLE_PASS_LIMIT = 45_000;
 
-/** Tamanho de cada chunk no modo map-reduce. */
-export const CHUNK_SIZE = 18_000;
+/**
+ * Tamanho de cada chunk no map-reduce.
+ * Mantido moderado: a IA precisa devolver o texto verbatim no JSON;
+ * chunks grandes (>10–12k) estouram o limite de saída do modelo (DP-MAP-OUTPUT).
+ */
+export const CHUNK_SIZE = 6_000;
 
 /** Divide o texto em chunks <= size, respeitando limites de parágrafo. */
 export function chunkText(text: string, size: number): string[] {

@@ -153,8 +153,31 @@ interface CatalogEntry {
 /**
  * Extrai tópicos de UM chunk de texto (passo MAP).
  * Usado pela rota `/api/process-map` — uma invocação curta na Vercel.
+ *
+ * Em falha por saída truncada/schema, tenta de novo com metade do chunk
+ * e une os resultados (mitiga DP-MAP-OUTPUT em apostilas densas).
  */
 export async function mapChunkTopics(chunk: string): Promise<MappedTopic[]> {
+  const input = chunk.slice(0, CHUNK_SIZE);
+  try {
+    return await mapChunkOnce(input);
+  } catch (err) {
+    // Chunk ainda grande ou saída truncada → divide e tenta de novo.
+    if (input.length < 800) throw err;
+    const mid = Math.floor(input.length / 2);
+    const left = input.slice(0, mid);
+    const right = input.slice(mid);
+    const [a, b] = await Promise.all([
+      mapChunkOnce(left).catch(() => [] as MappedTopic[]),
+      mapChunkOnce(right).catch(() => [] as MappedTopic[]),
+    ]);
+    const merged = [...a, ...b];
+    if (merged.length === 0) throw err;
+    return merged;
+  }
+}
+
+async function mapChunkOnce(chunk: string): Promise<MappedTopic[]> {
   const { object } = await generateObject({
     model: google(MODEL),
     schema: mapSchema,
@@ -163,6 +186,8 @@ export async function mapChunkTopics(chunk: string): Promise<MappedTopic[]> {
       VERBATIM_RULE +
       "\n\nPara cada tópico, forneça um título, uma categoria sugerida " +
       "e o conteúdo transcrito LITERALMENTE deste trecho. " +
+      "Se o trecho for longo, DIVIDA em vários tópicos menores em vez de " +
+      "um único tópico enorme. " +
       LANGUAGE_RULE,
     prompt:
       "Extraia os tópicos do trecho a seguir.\n\n---INÍCIO DO TRECHO---\n" +

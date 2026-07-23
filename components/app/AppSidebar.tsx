@@ -49,7 +49,7 @@ export default function AppSidebar({
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? "Falha ao excluir.");
+        throw new Error(body.error ?? "Falha ao excluir. [DP-DELETE-FAIL]");
       }
       try {
         sessionStorage.removeItem(`docupedia:${id}`);
