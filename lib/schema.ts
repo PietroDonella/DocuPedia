@@ -6,29 +6,31 @@ import { z } from "zod";
  *
  * A IA é obrigada a devolver EXATAMENTE esta estrutura, o que torna a
  * renderização da interface previsível e segura.
+ *
+ * O campo do tópico se chama `content` (não `summary`) para não induzir a
+ * IA a resumir. Documentos antigos podem ter `summary` — normalize no load.
  */
+
+const VERBATIM_CONTENT_DESC =
+  "Texto ORIGINAL e LITERAL do tópico — cópia integral do(s) trecho(s) do " +
+  "documento. É PROIBIDO resumir, encurtar, parafrasear, reescrever ou " +
+  "omitir frases. Preserve 100% das palavras, listas, passos, números e " +
+  "terminologia. Só corrija artefatos de extração do PDF (quebras no meio " +
+  "de frases, hifenização, espaços duplicados).";
 
 export const topicSchema = z.object({
   title: z.string().describe("Título curto e descritivo do tópico."),
-  summary: z
-    .string()
-    .describe(
-      "Conteúdo ORIGINAL e LITERAL do tópico. Transcreva o texto EXATAMENTE " +
-        "como aparece no documento — NÃO reescreva, NÃO parafraseie e NÃO " +
-        "resuma. Apenas copie o(s) trecho(s) correspondente(s), corrigindo " +
-        "somente artefatos da extração do PDF (quebras de linha no meio de " +
-        "frases, palavras hifenizadas e espaços duplicados). Preserve 100% " +
-        "das palavras, frases, exemplos, listas, passos, medidas, números e " +
-        "a terminologia originais.",
-    ),
+  content: z.string().describe(VERBATIM_CONTENT_DESC),
 });
 
 export const categorySchema = z.object({
   name: z
     .string()
     .describe(
-      "Nome da categoria — um tema abrangente que agrupa vários tópicos " +
-        "relacionados (ex.: 'Entradas', 'Sobremesas', 'Instalação').",
+      "Nome CURTO e ABRANGENTE da categoria (ex.: 'Fundamentos', " +
+        "'Práticas', 'Sobremesas'). Proibido fragmentar em variações " +
+        "quase iguais ou nomes longos com hífens/subtítulos " +
+        "(ex.: não use 'Tameana - Nível I - Aplicações').",
     ),
   description: z
     .string()
@@ -37,8 +39,9 @@ export const categorySchema = z.object({
   topics: z
     .array(topicSchema)
     .describe(
-      "Tópicos pertencentes a esta categoria. Tópicos semelhantes ou " +
-        "duplicados devem ser mesclados em um único tópico, não repetidos.",
+      "Tópicos desta categoria. Se unir tópicos duplicados, CONCATENE os " +
+        "textos originais na íntegra — nunca resuma ao mesclar. Não inclua " +
+        "linhas de índice/sumário.",
     ),
 });
 
@@ -52,10 +55,10 @@ export const encyclopediaSchema = z.object({
   categories: z
     .array(categorySchema)
     .describe(
-      "Categorias que agrupam logicamente os tópicos por afinidade temática. " +
-        "Prefira poucas categorias abrangentes e bem definidas a muitas " +
-        "categorias pequenas e fragmentadas. Cada tópico deve pertencer à " +
-        "categoria mais adequada, sem duplicação entre categorias.",
+      "Poucas categorias AMPLAS (em geral 4–10) por afinidade temática. " +
+        "Una sinônimos e subtemas próximos; não fragmente por capítulo, " +
+        "nível ou item do índice. Sem categorias de 'Índice'/'Estrutura do " +
+        "Documento'. Cada tópico em uma só categoria, sem duplicação.",
     ),
 });
 
@@ -63,3 +66,29 @@ export const encyclopediaSchema = z.object({
 export type Topic = z.infer<typeof topicSchema>;
 export type Category = z.infer<typeof categorySchema>;
 export type Encyclopedia = z.infer<typeof encyclopediaSchema>;
+
+/** Compat: docs antigos gravavam o texto em `summary`. */
+export function normalizeEncyclopedia(data: unknown): Encyclopedia {
+  const raw = data as {
+    title?: string;
+    description?: string;
+    categories?: Array<{
+      name: string;
+      description?: string;
+      topics?: Array<{ title?: string; content?: string; summary?: string }>;
+    }>;
+  };
+
+  return {
+    title: raw.title ?? "Documento",
+    description: raw.description ?? "",
+    categories: (raw.categories ?? []).map((c) => ({
+      name: c.name,
+      description: c.description,
+      topics: (c.topics ?? []).map((t) => ({
+        title: t.title ?? "",
+        content: t.content ?? t.summary ?? "",
+      })),
+    })),
+  };
+}

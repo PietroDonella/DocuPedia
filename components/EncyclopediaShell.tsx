@@ -33,7 +33,7 @@ export default function EncyclopediaShell({ data }: EncyclopediaShellProps) {
         const matchingTopics = category.topics.filter(
           (topic) =>
             topic.title.toLowerCase().includes(term) ||
-            topic.summary.toLowerCase().includes(term),
+            topic.content.toLowerCase().includes(term),
         );
 
         if (categoryMatches) return category;

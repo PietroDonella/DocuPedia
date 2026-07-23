@@ -63,7 +63,7 @@ export default function ContentView({
                   {highlight(topic.title, term)}
                 </h2>
                 <div className="mt-2 space-y-3">
-                  {splitParagraphs(topic.summary).map((paragraph, i) => (
+                  {splitParagraphs(topic.content).map((paragraph, i) => (
                     <p
                       key={i}
                       className="leading-7 text-ink-soft dark:text-zinc-300"

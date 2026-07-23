@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { structureDocument } from "@/lib/structure";
 import { saveDocument } from "@/lib/documents";
 import { getCurrentUser } from "@/lib/auth";
+import { titleFromPdfName } from "@/lib/pdf-title";
 import type { ProcessStreamEvent } from "@/lib/types";
 
 // A extração de PDF e o processamento por IA (map-reduce em PDFs grandes)
@@ -33,6 +34,7 @@ export async function POST(req: Request) {
   // Erros aqui retornam JSON com o status apropriado (a resposta ainda não
   // virou stream). O streaming só começa quando temos texto válido.
   let text = "";
+  let fileName = "";
   try {
     const formData = await req.formData();
     const file = formData.get("file");
@@ -49,6 +51,7 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
+    fileName = file.name;
 
     // Import dinâmico evita que o Next tente resolver o pacote em build time.
     const pdfParse = (await import("pdf-parse")).default;
@@ -86,9 +89,12 @@ export async function POST(req: Request) {
 
       try {
         const id = randomUUID();
-        const data = await structureDocument(text, {
+        let data = await structureDocument(text, {
           onProgress: (progress) => send({ type: "progress", ...progress }),
         });
+
+        const fromFile = titleFromPdfName(fileName);
+        if (fromFile) data = { ...data, title: fromFile };
 
         // Persiste no Supabase vinculado ao usuário (best-effort). Se falhar,
         // o front-end ainda exibe via sessionStorage nesta sessão.

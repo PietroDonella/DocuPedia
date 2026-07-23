@@ -3,16 +3,18 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { saveDocument } from "@/lib/documents";
 import { analyzeDocument, reduceMappedTopics } from "@/lib/structure";
+import { titleFromPdfName } from "@/lib/pdf-title";
 import type { MappedTopic } from "@/lib/types";
+import type { Encyclopedia } from "@/lib/schema";
 import { ErrorCode, classifyStageError, formatError } from "@/lib/errors";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 /**
  * POST /api/process-reduce
- * - { mode: "analyze", text }
- * - { mode: "reduce", topics: MappedTopic[] }
+ * - { mode: "analyze", text, fileName? }
+ * - { mode: "reduce", topics: MappedTopic[], fileName? }
  */
 export async function POST(req: Request) {
   const user = await getCurrentUser();
@@ -33,9 +35,10 @@ export async function POST(req: Request) {
       mode?: "analyze" | "reduce";
       text?: string;
       topics?: MappedTopic[];
+      fileName?: string;
     };
 
-    let data;
+    let data: Encyclopedia;
     if (body.mode === "analyze") {
       stage = "analyze";
       const text = body.text?.trim() ?? "";
@@ -81,6 +84,10 @@ export async function POST(req: Request) {
       );
     }
 
+    // Nome do arquivo PDF tem prioridade sobre o título gerado pela IA.
+    const fromFile = titleFromPdfName(body.fileName);
+    if (fromFile) data = { ...data, title: fromFile };
+
     const id = randomUUID();
     await saveDocument(id, user.id, data);
     return NextResponse.json({ id, data });
@@ -88,9 +95,13 @@ export async function POST(req: Request) {
     const code = classifyStageError(err, stage);
     const detail = err instanceof Error ? err.message : "erro desconhecido";
     console.error("Erro em /api/process-reduce:", code, detail);
+    const message =
+      code === ErrorCode.MAP_RATE
+        ? "Limite de uso da IA atingido. Aguarde cerca de 1 minuto e tente novamente."
+        : "Falha ao consolidar o documento.";
     return NextResponse.json(
       {
-        error: formatError("Falha ao consolidar o documento.", code),
+        error: formatError(message, code),
         code,
         detail,
       },

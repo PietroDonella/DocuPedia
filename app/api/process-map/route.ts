@@ -4,7 +4,7 @@ import { mapChunkTopics } from "@/lib/structure";
 import { ErrorCode, classifyAiError, formatError } from "@/lib/errors";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 /**
  * POST /api/process-map

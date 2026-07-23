@@ -11,8 +11,14 @@ type Status = "idle" | "dragging" | "uploading" | "error";
 
 /** Concorrência de chamadas MAP no cliente (cada uma = 1 função Vercel). */
 const CLIENT_MAP_CONCURRENCY = 1;
+/** Pausa entre chunks MAP para reduzir rate limit da API. */
+const MAP_CHUNK_DELAY_MS = 1_500;
+/** Pausa antes do reduce/analyze final (cota esfria após o MAP). */
+const PRE_REDUCE_DELAY_MS = 2_000;
 /** Limite defensivo de caracteres enviados à IA. */
 const MAX_CHARS = 500_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function UploadArea() {
   const router = useRouter();
@@ -60,13 +66,14 @@ export default function UploadArea() {
           result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
             mode: "analyze",
             text,
+            fileName: file.name,
           });
         } else {
           // 2b) Documento grande: map-reduce em várias invocações curtas.
           const chunks = chunkText(text, CHUNK_SIZE);
           setProgress({ phase: "mapping", current: 0, total: chunks.length });
 
-          const mapped = await mapChunksWithConcurrency(
+          const { topics: mapped, failedChunks } = await mapChunksWithConcurrency(
             chunks,
             CLIENT_MAP_CONCURRENCY,
             (current, total) =>
@@ -74,19 +81,35 @@ export default function UploadArea() {
           );
 
           if (mapped.length === 0) {
-            throw new Error(
-              formatError(
-                "A IA não conseguiu extrair tópicos deste documento. Tente outro PDF.",
-                ErrorCode.MAP_FAIL,
-              ),
+            // Fallback: se o MAP vier vazio (ex.: trechos só de índice ou
+            // falhas transitórias), tenta analisar o início do documento.
+            if (failedChunks === chunks.length) {
+              throw new Error(
+                formatError(
+                  "Falha ao processar os trechos do documento. Tente novamente em instantes.",
+                  ErrorCode.MAP_FAIL,
+                ),
+              );
+            }
+            console.warn(
+              "MAP sem tópicos; fallback para analyze no início do texto.",
             );
+            setProgress({ phase: "analyzing" });
+            result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
+              mode: "analyze",
+              text: text.slice(0, SINGLE_PASS_LIMIT),
+              fileName: file.name,
+            });
+          } else {
+            // Pausa breve: o MAP já consumiu cota; evita 429 no reduce.
+            await sleep(PRE_REDUCE_DELAY_MS);
+            setProgress({ phase: "reducing" });
+            result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
+              mode: "reduce",
+              topics: mapped,
+              fileName: file.name,
+            });
           }
-
-          setProgress({ phase: "reducing" });
-          result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
-            mode: "reduce",
-            topics: mapped,
-          });
         }
 
         try {
@@ -234,46 +257,80 @@ export default function UploadArea() {
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = (await res.json().catch(() => ({}))) as T & {
-      error?: string;
-      code?: string;
-    };
-    if (!res.ok) {
-      const msg =
-        data.error ??
-        formatError(`Falha na requisição (${res.status}).`, ErrorCode.NETWORK);
-      throw new Error(msg);
+  const maxAttempts = 4;
+  const delays = [0, 2_000, 5_000, 12_000];
+  let lastErr: Error | null = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (delays[attempt]) await sleep(delays[attempt]);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => ({}))) as T & {
+        error?: string;
+        code?: string;
+      };
+      if (!res.ok) {
+        const msg =
+          data.error ??
+          formatError(`Falha na requisição (${res.status}).`, ErrorCode.NETWORK);
+        const err = new Error(msg);
+        // Rate limit: tenta de novo com backoff.
+        if (
+          data.code === ErrorCode.MAP_RATE ||
+          msg.includes(ErrorCode.MAP_RATE)
+        ) {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+      return data;
+    } catch (err) {
+      if (err instanceof Error && /\[[A-Z0-9-]+\]/.test(err.message)) {
+        if (err.message.includes(ErrorCode.MAP_RATE)) {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+      throw new Error(
+        formatError(
+          err instanceof Error ? err.message : "Falha de rede.",
+          ErrorCode.NETWORK,
+        ),
+      );
     }
-    return data;
-  } catch (err) {
-    if (err instanceof Error && /\[[A-Z0-9-]+\]/.test(err.message)) throw err;
-    throw new Error(
-      formatError(
-        err instanceof Error ? err.message : "Falha de rede.",
-        ErrorCode.NETWORK,
-      ),
-    );
   }
+
+  throw (
+    lastErr ??
+    new Error(
+      formatError(
+        "Limite de uso da IA atingido. Aguarde um minuto e tente novamente.",
+        ErrorCode.MAP_RATE,
+      ),
+    )
+  );
 }
 
 async function mapChunksWithConcurrency(
   chunks: string[],
   limit: number,
   onProgress: (current: number, total: number) => void,
-): Promise<MappedTopic[]> {
+): Promise<{ topics: MappedTopic[]; failedChunks: number }> {
   const results = new Array<MappedTopic[]>(chunks.length);
   let cursor = 0;
   let completed = 0;
+  let failedChunks = 0;
 
   async function worker() {
     while (cursor < chunks.length) {
       const index = cursor++;
+      if (index > 0) await sleep(MAP_CHUNK_DELAY_MS);
       try {
         const res = await postJson<{ topics: MappedTopic[] }>(
           "/api/process-map",
@@ -284,6 +341,7 @@ async function mapChunksWithConcurrency(
         // Um trecho falhou após retry no servidor — segue com os demais.
         console.warn("Chunk ignorado após falha no MAP:", index, err);
         results[index] = [];
+        failedChunks++;
       }
       completed++;
       onProgress(completed, chunks.length);
@@ -293,7 +351,7 @@ async function mapChunksWithConcurrency(
   await Promise.all(
     Array.from({ length: Math.min(limit, chunks.length) }, () => worker()),
   );
-  return results.flat();
+  return { topics: results.flat(), failedChunks };
 }
 
 function progressLabel(progress: StructureProgress | null): string {

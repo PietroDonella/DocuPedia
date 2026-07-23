@@ -1,5 +1,8 @@
 import { createAdminClient, createClient } from "@/lib/supabase/server";
-import type { Encyclopedia } from "@/lib/schema";
+import {
+  normalizeEncyclopedia,
+  type Encyclopedia,
+} from "@/lib/schema";
 
 /**
  * Camada de persistência dos documentos processados (tabela `documents`).
@@ -57,7 +60,7 @@ export async function getDocument(id: string): Promise<Encyclopedia | null> {
       .maybeSingle();
 
     if (error || !data) return null;
-    return data.content_json as Encyclopedia;
+    return normalizeEncyclopedia(data.content_json);
   } catch (err) {
     console.error("Falha ao buscar documento:", err);
     return null;

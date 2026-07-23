@@ -8,6 +8,7 @@ import {
 } from "@/lib/schema";
 import type { StructureProgress, MappedTopic } from "@/lib/types";
 import { CHUNK_SIZE, SINGLE_PASS_LIMIT, chunkText } from "@/lib/chunk";
+import { withRateLimitRetry } from "@/lib/ai-retry";
 
 export { CHUNK_SIZE, SINGLE_PASS_LIMIT, chunkText } from "@/lib/chunk";
 export type { MappedTopic } from "@/lib/types";
@@ -26,7 +27,8 @@ export type { MappedTopic } from "@/lib/types";
 const MODEL = "gemini-2.5-flash";
 
 // Nº máximo de chamadas MAP simultâneas no caminho single-request.
-const MAP_CONCURRENCY = 4;
+// 1 evita estourar rate limit da API do Gemini.
+const MAP_CONCURRENCY = 1;
 
 // Regras de comportamento reutilizadas nos prompts.
 export interface StructureOptions {
@@ -34,11 +36,37 @@ export interface StructureOptions {
 }
 
 const VERBATIM_RULE =
-  "REGRA ABSOLUTA (conteúdo): o texto de cada tópico deve ser o texto " +
-  "ORIGINAL, transcrito LITERALMENTE (verbatim) do documento. É PROIBIDO " +
-  "reescrever, parafrasear, resumir, encurtar ou 'melhorar' o texto. A única " +
-  "edição permitida é corrigir artefatos da extração do PDF (quebras de linha " +
-  "no meio de frases, hifenização e espaços duplicados). Não invente nada.";
+  "REGRA ABSOLUTA (conteúdo): o campo content de cada tópico deve ser o " +
+  "texto ORIGINAL, transcrito LITERALMENTE (verbatim) do documento — a " +
+  "cópia INTEGRAL daquela seção. É PROIBIDO reescrever, parafrasear, " +
+  "resumir, encurtar, condensar ou 'melhorar' o texto. É PROIBIDO omitir " +
+  "parágrafos, frases, listas ou exemplos. A única edição permitida é " +
+  "corrigir artefatos da extração do PDF (quebras de linha no meio de " +
+  "frases, hifenização e espaços duplicados). Não invente nada.";
+
+const INDEX_IGNORE_RULE =
+  "REGRA (índice): NÃO use o índice/sumário/table of contents como fonte " +
+  "de tópicos ou categorias. Pule linhas que sejam só título + pontilhados " +
+  "+ número de página, ou seções rotuladas 'Índice'/'Sumário'/'Contents'. " +
+  "IMPORTANTE: isso NÃO significa devolver zero tópicos. Se o trecho tiver " +
+  "conteúdo do corpo do documento (parágrafos, explicações, práticas), " +
+  "EXTRAIA esses tópicos normalmente. Só omita as linhas de navegação.";
+
+const CATEGORY_RULE =
+  "REGRA DE CATEGORIZAÇÃO (abrangência): use POUCAS categorias AMPLAS e " +
+  "temáticas (em geral 4–10 no documento inteiro). É PROIBIDO fragmentar " +
+  "em categorias quase iguais ou muito específicas. Exemplos do que NÃO " +
+  "fazer: 'Tameana - Fundamentos', 'Tameana - Introdução', 'Tameana - " +
+  "Conceitos', 'Fundamentos da Tameana' e 'Conceitos Fundamentais' como " +
+  "categorias separadas — isso deve ser UMA só (ex.: 'Fundamentos'). " +
+  "Também é PROIBIDO criar uma categoria por nível/capítulo/seção do " +
+  "índice (ex.: 'Nível I', 'Nível II', 'Nível I - Aplicações'). Una " +
+  "sinônimos, variações de nome e subtemas próximos sob o mesmo rótulo " +
+  "abrangente. Prefira nomes curtos e gerais ('Fundamentos', 'Práticas', " +
+  "'Técnicas de Cura') em vez de nomes longos com hífens e subtítulos. " +
+  "Nunca crie categorias como 'Estrutura do Documento', 'Índice' ou " +
+  "'Informações do Curso' só porque o PDF tem sumário ou capa. Cada " +
+  "trecho aparece em uma só categoria.";
 
 const LANGUAGE_RULE =
   "Responda sempre no mesmo idioma predominante do documento.";
@@ -72,27 +100,32 @@ async function singlePass(
  * Exportado para a rota `/api/process-analyze` (Vercel: 1 invocação curta).
  */
 export async function analyzeDocument(text: string): Promise<Encyclopedia> {
-  const { object } = await generateObject({
-    model: google(MODEL),
-    schema: encyclopediaSchema,
-    system:
-      "Você é um BIBLIOTECÁRIO/CLASSIFICADOR. Seu único trabalho é ORGANIZAR " +
-      "e CATEGORIZAR o texto de um documento — nunca reescrevê-lo.\n\n" +
-      VERBATIM_RULE +
-      "\n\nREGRA DE CATEGORIZAÇÃO (eficiência): leia o documento inteiro, " +
-      "identifique os tópicos e AGRUPE tópicos semelhantes/relacionados sob a " +
-      "MESMA categoria. Mescle tópicos duplicados. Crie um número enxuto de " +
-      "categorias abrangentes e coerentes (evite categorias minúsculas ou uma " +
-      "categoria genérica de 'diversos'). Cada trecho aparece em uma só " +
-      "categoria.\n\n" +
-      LANGUAGE_RULE,
-    prompt:
-      "Classifique e agrupe o texto a seguir, extraído de um documento PDF, " +
-      "na estrutura solicitada, transcrevendo o conteúdo LITERALMENTE.\n\n" +
-      "---INÍCIO DO DOCUMENTO---\n" +
-      text +
-      "\n---FIM DO DOCUMENTO---",
-  });
+  const { object } = await withRateLimitRetry(
+    () =>
+      generateObject({
+        model: google(MODEL),
+        schema: encyclopediaSchema,
+        system:
+          "Você é um BIBLIOTECÁRIO/CLASSIFICADOR. Seu único trabalho é ORGANIZAR " +
+          "e CATEGORIZAR o texto de um documento — nunca reescrevê-lo.\n\n" +
+          VERBATIM_RULE +
+          "\n\n" +
+          INDEX_IGNORE_RULE +
+          "\n\n" +
+          CATEGORY_RULE +
+          "\n\nMescle tópicos duplicados concatenando o texto original (sem " +
+          "resumir). Evite uma categoria genérica de 'diversos'.\n\n" +
+          LANGUAGE_RULE,
+        prompt:
+          "Classifique e agrupe o texto a seguir, extraído de um documento PDF, " +
+          "na estrutura solicitada, transcrevendo o conteúdo LITERALMENTE. " +
+          "Ignore índice/sumário se houver.\n\n" +
+          "---INÍCIO DO DOCUMENTO---\n" +
+          text +
+          "\n---FIM DO DOCUMENTO---",
+      }),
+    { label: "analyze" },
+  );
   return object;
 }
 
@@ -109,13 +142,15 @@ const mapSchema = z.object({
         category: z
           .string()
           .describe(
-            "Categoria temática sugerida para este tópico (ex.: 'Sobremesas').",
+            "Categoria temática AMPLA sugerida (ex.: 'Fundamentos', " +
+              "'Práticas', 'Sobremesas'). Evite nomes hiper-específicos ou " +
+              "variações quase iguais de outras categorias.",
           ),
         content: z
           .string()
           .describe(
-            "Texto ORIGINAL e LITERAL do tópico, transcrito verbatim deste " +
-              "trecho do documento (sem reescrever, parafrasear ou resumir).",
+            "Cópia INTEGRAL e LITERAL do texto deste tópico no trecho " +
+              "(sem resumir, encurtar, parafrasear ou omitir frases).",
           ),
       }),
     )
@@ -138,9 +173,10 @@ const reduceSchema = z.object({
       }),
     )
     .describe(
-      "Taxonomia GLOBAL: agrupe tópicos semelhantes/relacionados na mesma " +
-        "categoria. Poucas categorias abrangentes e coerentes; cada tópico em " +
-        "uma única categoria.",
+      "Taxonomia GLOBAL com POUCAS categorias AMPLAS (em geral 4–10). " +
+        "Una sinônimos e subtemas próximos numa só categoria; não fragmente " +
+        "por capítulo/nível/índice. Cada tópico em uma única categoria. " +
+        "Descarte tópicos que sejam só linhas de índice/sumário.",
     ),
 });
 
@@ -162,15 +198,13 @@ export async function mapChunkTopics(chunk: string): Promise<MappedTopic[]> {
   try {
     return await mapChunkOnce(input);
   } catch (err) {
-    // Chunk ainda grande ou saída truncada → divide e tenta de novo.
+    // Chunk ainda grande ou saída truncada → divide e tenta de novo (em série).
     if (input.length < 800) throw err;
     const mid = Math.floor(input.length / 2);
     const left = input.slice(0, mid);
     const right = input.slice(mid);
-    const [a, b] = await Promise.all([
-      mapChunkOnce(left).catch(() => [] as MappedTopic[]),
-      mapChunkOnce(right).catch(() => [] as MappedTopic[]),
-    ]);
+    const a = await mapChunkOnce(left).catch(() => [] as MappedTopic[]);
+    const b = await mapChunkOnce(right).catch(() => [] as MappedTopic[]);
     const merged = [...a, ...b];
     if (merged.length === 0) throw err;
     return merged;
@@ -178,23 +212,35 @@ export async function mapChunkTopics(chunk: string): Promise<MappedTopic[]> {
 }
 
 async function mapChunkOnce(chunk: string): Promise<MappedTopic[]> {
-  const { object } = await generateObject({
-    model: google(MODEL),
-    schema: mapSchema,
-    system:
-      "Você extrai tópicos de UM TRECHO de um documento maior. " +
-      VERBATIM_RULE +
-      "\n\nPara cada tópico, forneça um título, uma categoria sugerida " +
-      "e o conteúdo transcrito LITERALMENTE deste trecho. " +
-      "Se o trecho for longo, DIVIDA em vários tópicos menores em vez de " +
-      "um único tópico enorme. " +
-      LANGUAGE_RULE,
-    prompt:
-      "Extraia os tópicos do trecho a seguir.\n\n---INÍCIO DO TRECHO---\n" +
-      chunk +
-      "\n---FIM DO TRECHO---",
-  });
-  return object.topics;
+  const { object } = await withRateLimitRetry(
+    () =>
+      generateObject({
+        model: google(MODEL),
+        schema: mapSchema,
+        system:
+          "Você extrai tópicos de UM TRECHO de um documento maior. " +
+          VERBATIM_RULE +
+          "\n\n" +
+          INDEX_IGNORE_RULE +
+          "\n\nCubra TODO o conteúdo substantivo do trecho: não pule seções. " +
+          "Para cada tópico, forneça título, categoria AMPLA (nome curto) e " +
+          "content com o texto COMPLETO daquela parte. Prefira menos tópicos " +
+          "com texto longo e íntegro a muitos tópicos curtos/resumidos. " +
+          "Só devolva lista vazia se o trecho inteiro for exclusivamente " +
+          "índice/sumário. " +
+          LANGUAGE_RULE,
+        prompt:
+          "Extraia os tópicos deste trecho com texto LITERAL e completo " +
+          "(pule só linhas de índice).\n\n" +
+          "---INÍCIO DO TRECHO---\n" +
+          chunk +
+          "\n---FIM DO TRECHO---",
+      }),
+    { label: "map" },
+  );
+  return object.topics.filter(
+    (t) => !looksLikeIndexEntry(t.title, t.category),
+  );
 }
 
 /**
@@ -208,7 +254,7 @@ export async function reduceMappedTopics(
   const catalog: CatalogEntry[] = [];
   mapped.forEach((t, i) => {
     const id = `t${i}`;
-    topicsById.set(id, { title: t.title, summary: t.content });
+    topicsById.set(id, { title: t.title, content: t.content });
     catalog.push({ id, title: t.title, category: t.category });
   });
 
@@ -221,23 +267,32 @@ export async function reduceMappedTopics(
   }
 
   try {
-    const { object: reduced } = await generateObject({
-      model: google(MODEL),
-      schema: reduceSchema,
-      system:
-        "Você organiza um catálogo de tópicos em uma taxonomia GLOBAL " +
-        "coerente. Agrupe tópicos semelhantes/relacionados na mesma categoria, " +
-        "una categorias equivalentes com nomes diferentes e prefira poucas " +
-        "categorias abrangentes. Use os IDs fornecidos; não invente IDs. " +
-        LANGUAGE_RULE,
-      prompt:
-        "Catálogo de tópicos (id | título | categoria sugerida). Defina o " +
-        "título/descrição do documento e agrupe TODOS os tópicos em categorias " +
-        "coerentes referenciando seus IDs.\n\n" +
-        catalog
-          .map((c) => `${c.id} | ${c.title} | ${c.category}`)
-          .join("\n"),
-    });
+    const { object: reduced } = await withRateLimitRetry(
+      () =>
+        generateObject({
+          model: google(MODEL),
+          schema: reduceSchema,
+          system:
+            "Você organiza um catálogo de tópicos em uma taxonomia GLOBAL " +
+            "coerente.\n\n" +
+            CATEGORY_RULE +
+            "\n\n" +
+            "Descarte tópicos que claramente sejam só linhas de índice/sumário " +
+            "(título + página, pontilhados, 'Índice', 'Estrutura do Documento'). " +
+            "Não os coloque em nenhuma categoria.\n\n" +
+            "Use apenas os IDs fornecidos; não invente IDs. " +
+            LANGUAGE_RULE,
+          prompt:
+            "Catálogo de tópicos (id | título | categoria sugerida). Defina o " +
+            "título/descrição do documento e agrupe os tópicos em POUCAS " +
+            "categorias AMPLAS (una sinônimos e subtemas). Ignore itens de " +
+            "índice. Referencie os IDs.\n\n" +
+            catalog
+              .map((c) => `${c.id} | ${c.title} | ${c.category}`)
+              .join("\n"),
+        }),
+      { label: "reduce" },
+    );
     return assembleFromReduced(reduced, catalog, topicsById);
   } catch (err) {
     console.error("Falha no REDUCE; usando categorias sugeridas:", err);
@@ -302,14 +357,15 @@ function assembleFromReduced(
     })
     .filter((c) => c.topics.length > 0);
 
+  // Tópicos omitidos no REDUCE (ex.: índice) não voltam como categorias
+  // novas — só entram se já existir uma categoria com o mesmo nome.
   const leftovers = catalog.filter((c) => !used.has(c.id));
   for (const entry of leftovers) {
-    const topic = topicsById.get(entry.id)!;
+    if (looksLikeIndexEntry(entry.title, entry.category)) continue;
     const existing = categories.find(
       (c) => normalizeName(c.name) === normalizeName(entry.category),
     );
-    if (existing) existing.topics.push(topic);
-    else categories.push({ name: entry.category, topics: [topic] });
+    if (existing) existing.topics.push(topicsById.get(entry.id)!);
   }
 
   return {
@@ -326,6 +382,7 @@ function assembleFromSuggested(
 ): Encyclopedia {
   const byCategory = new Map<string, { name: string; topics: Topic[] }>();
   for (const entry of catalog) {
+    if (looksLikeIndexEntry(entry.title, entry.category)) continue;
     const key = normalizeName(entry.category);
     if (!byCategory.has(key)) {
       byCategory.set(key, { name: entry.category, topics: [] });
@@ -349,6 +406,19 @@ function normalizeName(name: string): string {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .trim();
+}
+
+/** Heurística: título/categoria que parecem vir do índice/sumário do PDF. */
+function looksLikeIndexEntry(title: string, category: string): boolean {
+  const blob = normalizeName(`${title} ${category}`);
+  if (
+    /\b(indice|sumario|table of contents|estrutura do documento)\b/.test(blob)
+  ) {
+    return true;
+  }
+  // "Título ...... 42" típico de sumário com leader dots.
+  if (/\.{3,}\s*\d+\s*$/.test(title.trim())) return true;
+  return false;
 }
 
 /** Executa `fn` sobre `items` com no máximo `limit` execuções simultâneas. */

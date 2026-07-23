@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { Encyclopedia } from "@/lib/schema";
+import { normalizeEncyclopedia } from "@/lib/schema";
 import EncyclopediaShell from "@/components/EncyclopediaShell";
 
 type LoadState =
@@ -22,7 +23,10 @@ export default function DocumentLoader({ id }: { id: string }) {
     try {
       const cached = sessionStorage.getItem(`docupedia:${id}`);
       if (cached) {
-        setState({ status: "ready", data: JSON.parse(cached) as Encyclopedia });
+        setState({
+          status: "ready",
+          data: normalizeEncyclopedia(JSON.parse(cached)),
+        });
         return;
       }
     } catch {
