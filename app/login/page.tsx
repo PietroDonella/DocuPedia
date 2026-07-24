@@ -1,16 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { getSiteUrl } from "@/lib/site-url";
 
-type Mode = "signin" | "signup";
+type Mode = "signin" | "signup" | "forgot";
 
 /**
  * Tela de autenticação (e-mail/senha) via Supabase Auth.
- * - Entrar: signInWithPassword → redireciona para a home.
- * - Cadastrar: signUp → entra direto (se e-mail não exige confirmação) ou
- *   mostra aviso para confirmar o e-mail.
+ * - Entrar / Cadastrar / Esqueci a senha (envia e-mail de redefinição).
  */
 export default function LoginPage() {
   const router = useRouter();
@@ -21,6 +20,15 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("erro") === "link") {
+      setError(
+        "O link de redefinição é inválido ou expirou. Solicite um novo.",
+      );
+    }
+  }, []);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -30,6 +38,18 @@ export default function LoginPage() {
     const supabase = createClient();
 
     try {
+      if (mode === "forgot") {
+        const siteUrl = getSiteUrl();
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: `${siteUrl}/auth/callback?next=/auth/atualizar-senha`,
+        });
+        if (error) throw error;
+        setInfo(
+          "Se este e-mail estiver cadastrado, você receberá um link para redefinir a senha. Verifique também a caixa de spam.",
+        );
+        return;
+      }
+
       if (mode === "signin") {
         const { error } = await supabase.auth.signInWithPassword({
           email,
@@ -45,7 +65,6 @@ export default function LoginPage() {
       const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) throw error;
 
-      // Se o projeto exige confirmação de e-mail, não há sessão ainda.
       if (data.session) {
         router.push("/");
         router.refresh();
@@ -66,6 +85,27 @@ export default function LoginPage() {
     }
   }
 
+  function switchMode(next: Mode) {
+    setMode(next);
+    setError(null);
+    setInfo(null);
+  }
+
+  const titles: Record<Mode, { h1: string; sub: string }> = {
+    signin: {
+      h1: "Entrar no DocuPedia",
+      sub: "Acesse seus PDFs categorizados.",
+    },
+    signup: {
+      h1: "Criar sua conta",
+      sub: "Comece a organizar seus PDFs com IA.",
+    },
+    forgot: {
+      h1: "Recuperar senha",
+      sub: "Enviaremos um link de redefinição para o seu e-mail.",
+    },
+  };
+
   return (
     <main className="grid min-h-screen place-items-center px-6 py-12">
       <div className="w-full max-w-sm">
@@ -74,12 +114,10 @@ export default function LoginPage() {
             D
           </span>
           <h1 className="mt-4 text-2xl font-semibold tracking-tight text-ink dark:text-zinc-100">
-            {mode === "signin" ? "Entrar no DocuPedia" : "Criar sua conta"}
+            {titles[mode].h1}
           </h1>
           <p className="mt-2 text-sm text-ink-soft dark:text-zinc-400">
-            {mode === "signin"
-              ? "Acesse seus PDFs categorizados."
-              : "Comece a organizar seus PDFs com IA."}
+            {titles[mode].sub}
           </p>
         </div>
 
@@ -105,26 +143,39 @@ export default function LoginPage() {
             />
           </div>
 
-          <div>
-            <label
-              htmlFor="password"
-              className="mb-1.5 block text-sm font-medium text-ink dark:text-zinc-200"
-            >
-              Senha
-            </label>
-            <input
-              id="password"
-              type="password"
-              required
-              minLength={6}
-              autoComplete={
-                mode === "signin" ? "current-password" : "new-password"
-              }
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-surface-border bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 dark:border-white/10 dark:bg-white/5 dark:text-zinc-100"
-            />
-          </div>
+          {mode !== "forgot" && (
+            <div>
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <label
+                  htmlFor="password"
+                  className="block text-sm font-medium text-ink dark:text-zinc-200"
+                >
+                  Senha
+                </label>
+                {mode === "signin" && (
+                  <button
+                    type="button"
+                    onClick={() => switchMode("forgot")}
+                    className="text-xs font-medium text-accent hover:underline"
+                  >
+                    Esqueci a senha
+                  </button>
+                )}
+              </div>
+              <input
+                id="password"
+                type="password"
+                required
+                minLength={6}
+                autoComplete={
+                  mode === "signin" ? "current-password" : "new-password"
+                }
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full rounded-lg border border-surface-border bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 dark:border-white/10 dark:bg-white/5 dark:text-zinc-100"
+              />
+            </div>
+          )}
 
           {error && (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-500/10 dark:text-red-300">
@@ -146,23 +197,38 @@ export default function LoginPage() {
               ? "Aguarde…"
               : mode === "signin"
                 ? "Entrar"
-                : "Criar conta"}
+                : mode === "signup"
+                  ? "Criar conta"
+                  : "Enviar link"}
           </button>
         </form>
 
         <p className="mt-6 text-center text-sm text-ink-soft dark:text-zinc-400">
-          {mode === "signin" ? "Ainda não tem conta?" : "Já tem uma conta?"}{" "}
-          <button
-            type="button"
-            onClick={() => {
-              setMode(mode === "signin" ? "signup" : "signin");
-              setError(null);
-              setInfo(null);
-            }}
-            className="font-medium text-accent hover:underline"
-          >
-            {mode === "signin" ? "Cadastre-se" : "Entrar"}
-          </button>
+          {mode === "forgot" ? (
+            <>
+              Lembrou a senha?{" "}
+              <button
+                type="button"
+                onClick={() => switchMode("signin")}
+                className="font-medium text-accent hover:underline"
+              >
+                Voltar ao login
+              </button>
+            </>
+          ) : (
+            <>
+              {mode === "signin" ? "Ainda não tem conta?" : "Já tem uma conta?"}{" "}
+              <button
+                type="button"
+                onClick={() =>
+                  switchMode(mode === "signin" ? "signup" : "signin")
+                }
+                className="font-medium text-accent hover:underline"
+              >
+                {mode === "signin" ? "Cadastre-se" : "Entrar"}
+              </button>
+            </>
+          )}
         </p>
       </div>
     </main>
@@ -180,5 +246,7 @@ function traduzErro(msg: string): string {
     return "A senha deve ter pelo menos 6 caracteres.";
   if (m.includes("email not confirmed"))
     return "Confirme seu e-mail antes de entrar.";
+  if (m.includes("rate limit") || m.includes("for security purposes"))
+    return "Muitas tentativas. Aguarde um momento e tente de novo.";
   return msg;
 }
