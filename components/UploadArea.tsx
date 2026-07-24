@@ -1,11 +1,15 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { extractPdfText } from "@/lib/pdf-client";
 import { CHUNK_SIZE, SINGLE_PASS_LIMIT, chunkText } from "@/lib/chunk";
 import { ErrorCode, formatError } from "@/lib/errors";
-import type { MappedTopic, ProcessPdfResponse, StructureProgress } from "@/lib/types";
+import type {
+  MappedTopic,
+  ProcessPdfResponse,
+  StructureProgress,
+} from "@/lib/types";
 
 type Status = "idle" | "dragging" | "uploading" | "error";
 
@@ -18,6 +22,13 @@ const PRE_REDUCE_DELAY_MS = 2_000;
 /** Limite defensivo de caracteres enviados à IA. */
 const MAX_CHARS = 500_000;
 
+/** Pesos das fases no percentual global (somam 100). */
+const PHASE_WEIGHT = {
+  extracting: 12,
+  ai: 76, // mapping ou analyzing
+  reducing: 12,
+} as const;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function UploadArea() {
@@ -27,12 +38,51 @@ export default function UploadArea() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [progress, setProgress] = useState<StructureProgress | null>(null);
+  /** Sub-progresso 0–1 dentro de analyzing/reducing (chamada única à IA). */
+  const [softFrac, setSoftFrac] = useState(0);
+  const softStartRef = useRef<number | null>(null);
+
+  // Sobe o percentual suavemente enquanto a IA trabalha (analyze/reduce
+  // ou dentro de um trecho do map ainda sem resposta).
+  useEffect(() => {
+    const mappingInFlight =
+      progress?.phase === "mapping" &&
+      (progress.total ?? 0) > 0 &&
+      (progress.current ?? 0) < (progress.total ?? 0);
+    const needsSoft =
+      progress?.phase === "analyzing" ||
+      progress?.phase === "reducing" ||
+      mappingInFlight;
+
+    if (!needsSoft) {
+      softStartRef.current = null;
+      setSoftFrac(0);
+      return;
+    }
+
+    // Reinicia a curva a cada novo trecho do MAP.
+    softStartRef.current = Date.now();
+    const started = softStartRef.current;
+    const tick = () => {
+      const elapsed = Date.now() - started;
+      // Analyze/reduce: sobe ao longo de ~1 min. Map (por trecho): mais rápido.
+      const tau = progress?.phase === "mapping" ? 14_000 : 28_000;
+      const frac = 1 - Math.exp(-elapsed / tau);
+      setSoftFrac(Math.min(0.92, frac));
+    };
+    tick();
+    const id = window.setInterval(tick, 350);
+    return () => window.clearInterval(id);
+  }, [progress?.phase, progress?.current, progress?.total]);
 
   const handleFile = useCallback(
     async (file: File) => {
       setErrorMsg(null);
 
-      if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      if (
+        file.type !== "application/pdf" &&
+        !file.name.toLowerCase().endsWith(".pdf")
+      ) {
         setStatus("error");
         setErrorMsg("Por favor, envie um arquivo no formato PDF.");
         return;
@@ -43,7 +93,6 @@ export default function UploadArea() {
       setStatus("uploading");
 
       try {
-        // 1) Extração no navegador — evita o limite de ~4,5 MB do body na Vercel.
         const rawText = await extractPdfText(file, (current, total) => {
           setProgress({ phase: "extracting", current, total });
         });
@@ -61,7 +110,6 @@ export default function UploadArea() {
         let result: ProcessPdfResponse;
 
         if (text.length <= SINGLE_PASS_LIMIT) {
-          // 2a) Documento pequeno: uma única chamada.
           setProgress({ phase: "analyzing" });
           result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
             mode: "analyze",
@@ -69,20 +117,22 @@ export default function UploadArea() {
             fileName: file.name,
           });
         } else {
-          // 2b) Documento grande: map-reduce em várias invocações curtas.
           const chunks = chunkText(text, CHUNK_SIZE);
-          setProgress({ phase: "mapping", current: 0, total: chunks.length });
+          setProgress({
+            phase: "mapping",
+            current: 0,
+            total: chunks.length,
+          });
 
-          const { topics: mapped, failedChunks } = await mapChunksWithConcurrency(
-            chunks,
-            CLIENT_MAP_CONCURRENCY,
-            (current, total) =>
-              setProgress({ phase: "mapping", current, total }),
-          );
+          const { topics: mapped, failedChunks } =
+            await mapChunksWithConcurrency(
+              chunks,
+              CLIENT_MAP_CONCURRENCY,
+              (current, total) =>
+                setProgress({ phase: "mapping", current, total }),
+            );
 
           if (mapped.length === 0) {
-            // Fallback: se o MAP vier vazio (ex.: trechos só de índice ou
-            // falhas transitórias), tenta analisar o início do documento.
             if (failedChunks === chunks.length) {
               throw new Error(
                 formatError(
@@ -101,7 +151,6 @@ export default function UploadArea() {
               fileName: file.name,
             });
           } else {
-            // Pausa breve: o MAP já consumiu cota; evita 429 no reduce.
             await sleep(PRE_REDUCE_DELAY_MS);
             setProgress({ phase: "reducing" });
             result = await postJson<ProcessPdfResponse>("/api/process-reduce", {
@@ -145,12 +194,7 @@ export default function UploadArea() {
   );
 
   const isBusy = status === "uploading";
-
-  const percent =
-    (progress?.phase === "mapping" || progress?.phase === "extracting") &&
-    progress.total
-      ? Math.min(99, Math.round(((progress.current ?? 0) / progress.total) * 100))
-      : null;
+  const percent = computeOverallPercent(progress, softFrac);
 
   return (
     <div className="w-full max-w-xl">
@@ -200,22 +244,22 @@ export default function UploadArea() {
                 {progressLabel(progress)}
               </p>
 
-              <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-surface-border dark:bg-white/10">
-                {percent !== null ? (
-                  <div
-                    className="h-full rounded-full bg-accent transition-all duration-500 ease-out"
-                    style={{ width: `${percent}%` }}
-                  />
-                ) : (
-                  <div className="h-full w-full animate-pulse rounded-full bg-accent/70" />
-                )}
+              <div
+                className="mt-3 h-2 w-full overflow-hidden rounded-full bg-surface-border dark:bg-white/10"
+                role="progressbar"
+                aria-valuenow={percent}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div
+                  className="h-full rounded-full bg-accent transition-[width] duration-500 ease-out"
+                  style={{ width: `${percent}%` }}
+                />
               </div>
 
-              {percent !== null && (
-                <p className="mt-1.5 text-right text-xs text-ink-muted dark:text-zinc-500">
-                  {percent}%
-                </p>
-              )}
+              <p className="mt-1.5 text-right text-xs tabular-nums text-ink-muted dark:text-zinc-500">
+                {percent}%
+              </p>
 
               {fileName && (
                 <p className="mt-2 truncate text-center text-xs text-ink-muted dark:text-zinc-500">
@@ -256,6 +300,39 @@ export default function UploadArea() {
   );
 }
 
+/** Percentual global 0–99 a partir da fase + progresso interno. */
+function computeOverallPercent(
+  progress: StructureProgress | null,
+  softFrac: number,
+): number {
+  if (!progress) return 0;
+  const { phase, current = 0, total = 0 } = progress;
+  const extractEnd = PHASE_WEIGHT.extracting;
+  const aiEnd = extractEnd + PHASE_WEIGHT.ai;
+
+  if (phase === "extracting") {
+    const frac = total > 0 ? Math.min(1, current / total) : 0.15;
+    return Math.max(1, Math.round(frac * extractEnd));
+  }
+
+  if (phase === "mapping") {
+    // Trechos concluídos + fração do trecho em andamento (softFrac).
+    const base = total > 0 ? Math.min(1, current / total) : 0;
+    const step = total > 0 && current < total ? (softFrac * 0.9) / total : 0;
+    return Math.round(extractEnd + Math.min(1, base + step) * PHASE_WEIGHT.ai);
+  }
+
+  if (phase === "analyzing") {
+    return Math.round(extractEnd + softFrac * PHASE_WEIGHT.ai);
+  }
+
+  if (phase === "reducing") {
+    return Math.round(aiEnd + softFrac * PHASE_WEIGHT.reducing);
+  }
+
+  return extractEnd;
+}
+
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const maxAttempts = 4;
   const delays = [0, 2_000, 5_000, 12_000];
@@ -276,9 +353,11 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
       if (!res.ok) {
         const msg =
           data.error ??
-          formatError(`Falha na requisição (${res.status}).`, ErrorCode.NETWORK);
+          formatError(
+            `Falha na requisição (${res.status}).`,
+            ErrorCode.NETWORK,
+          );
         const err = new Error(msg);
-        // Rate limit: tenta de novo com backoff.
         if (
           data.code === ErrorCode.MAP_RATE ||
           msg.includes(ErrorCode.MAP_RATE)
@@ -331,6 +410,8 @@ async function mapChunksWithConcurrency(
     while (cursor < chunks.length) {
       const index = cursor++;
       if (index > 0) await sleep(MAP_CHUNK_DELAY_MS);
+      // Atualiza rótulo com o trecho em andamento (antes da resposta).
+      onProgress(completed, chunks.length);
       try {
         const res = await postJson<{ topics: MappedTopic[] }>(
           "/api/process-map",
@@ -338,7 +419,6 @@ async function mapChunksWithConcurrency(
         );
         results[index] = res.topics ?? [];
       } catch (err) {
-        // Um trecho falhou após retry no servidor — segue com os demais.
         console.warn("Chunk ignorado após falha no MAP:", index, err);
         results[index] = [];
         failedChunks++;
@@ -362,13 +442,17 @@ function progressLabel(progress: StructureProgress | null): string {
         ? `Lendo o PDF… (página ${progress.current ?? 0} de ${progress.total})`
         : "Lendo o PDF…";
     case "analyzing":
-      return "Analisando o documento…";
-    case "mapping":
-      return `Categorizando o conteúdo… (parte ${progress.current ?? 0} de ${
-        progress.total ?? 0
-      })`;
+      return "A IA está analisando o documento…";
+    case "mapping": {
+      const total = progress.total ?? 0;
+      const done = progress.current ?? 0;
+      const working = Math.min(total, done + 1);
+      return total
+        ? `A IA está categorizando… (trecho ${working} de ${total})`
+        : "A IA está categorizando…";
+    }
     case "reducing":
-      return "Consolidando as categorias…";
+      return "A IA está consolidando as categorias…";
     default:
       return "Processando…";
   }
